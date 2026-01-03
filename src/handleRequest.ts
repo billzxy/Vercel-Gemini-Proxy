@@ -6,6 +6,8 @@ import { type WebWritableStream, WritableStream } from './libs/TransformStream'
 import type { Message } from './types/message'
 import { convertStringToUint8Array } from './utils/convertStringToUint8Array'
 import { getContentLength } from './utils/getContentLength'
+import type { GeminiResponse } from './utils/parseGeminiResponse'
+import { parseGeminiResponse } from './utils/parseGeminiResponse'
 import { pickHeaders } from './utils/pickHeaders'
 
 /** Handle the incoming request. */
@@ -176,7 +178,7 @@ export async function handleRequest(context: Context) {
 
       await read()
 
-      logger.response.info(`Response spent ${((Date.now() - responseStartTime) / 1e3).toFixed(3)} s.`)
+      logger.response.info(`Response took ${((Date.now() - responseStartTime) / 1e3).toFixed(3)} s.`)
     } catch (error) {
       const message = error instanceof Error ? error?.message : error
       logger.response.fail(`Proxy failed with some errors.\n${message}`)
@@ -204,7 +206,31 @@ export async function handleRequest(context: Context) {
     .then(async (response) => {
       clearTimeout(timeoutId)
 
-      logger.request.info(`Request spent ${((Date.now() - requestStartTime) / 1e3).toFixed(3)}s.`)
+      logger.request.info(`Request took ${((Date.now() - requestStartTime) / 1e3).toFixed(3)}s.`)
+
+      if (response.ok) {
+        try {
+          const data = await response.json()
+          const parsed = parseGeminiResponse(data as GeminiResponse)
+
+          const writer = responseStream.writable.getWriter()
+          await writer.ready
+          await writer.write(convertStringToUint8Array(parsed))
+          await writer.close()
+          writer.releaseLock()
+          return
+        } catch (error) {
+          logger.response.warn(`Failed to parse Gemini response. Error: ${error}`)
+          const writer = responseStream.writable.getWriter()
+          await writer.ready
+          const errorMsg = createException('Failed to parse Gemini response').toJson()
+          await writer.write(convertStringToUint8Array(errorMsg))
+          await writer.close()
+          writer.releaseLock()
+          return
+        }
+      }
+
       responseStream.setContentSize(getContentLength(response.headers))
 
       const handleResponse = writeResponseToWritableStream(responseStream.writable)
@@ -224,6 +250,6 @@ export async function handleRequest(context: Context) {
       await handleResponse(error)
     })
 
-  logger.response.info('proxy stream start.')
+  logger.response.info('proxy stream starts.')
   return new Response(responseStream.readable, { status: 200, statusText: 'ok', headers })
 }
